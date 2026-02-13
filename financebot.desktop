@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FinanceBot
+Comment=SPX Put/Call Ratio Dashboard
+Exec=gnome-terminal --working-directory=/media/sf_Claudestuff/financebot -- bash -c './start.sh; exec bash'
+Icon=finance
+Terminal=true
+StartupWMClass=Streamlit

@@ -1,0 +1,6 @@
+streamlit==1.28.1
+yfinance==0.2.40
+pandas==1.5.3
+plotly==5.17.0
+multitasking==0.0.10
+
