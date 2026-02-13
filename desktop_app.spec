@@ -8,6 +8,9 @@ a = Analysis(
         ('bearish.mp4', '.'),
         ('bullish.mp4', '.'),
         ('neutral.mp4', '.'),
+        ('bearish.mp3', '.'),
+        ('bullish.mp3', '.'),
+        ('neutral.mp3', '.'),
     ],
     hiddenimports=[
         'PyQt6.QtWebEngineWidgets',

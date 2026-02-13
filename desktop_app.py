@@ -51,7 +51,7 @@ PRESET_TICKERS = [
 ]
 MAX_HISTORY = 100
 REFRESH_INTERVAL_MS = 60_000
-NUM_3D_EXPIRIES = 5  # Number of expiries to display in 3D chart
+NUM_3D_EXPIRIES = 12  # Number of expiries to display in 3D chart
 
 # --- Tradier API config ---
 TRADIER_BASE_URL = "https://api.tradier.com/v1"
@@ -162,7 +162,7 @@ class DataFetcher(QThread):
                 dates = data["expirations"].get("date", [])
                 if isinstance(dates, str):
                     dates = [dates]
-                expiries = dates[:10]
+                expiries = dates[:20]
                 logger.info("Expiries for %s: %s", ticker, expiries)
                 self.expiries_ready.emit(ticker, expiries)
             else:
@@ -171,6 +171,8 @@ class DataFetcher(QThread):
             time.sleep(0.2)
 
         # Then fetch option chain data for each ticker/expiry pair
+        # Use a single timestamp for the entire refresh cycle so all expiries align on the time axis
+        cycle_timestamp = datetime.now().strftime('%H:%M:%S')
         for ticker, expiry in self.tasks:
             if self.isInterruptionRequested():
                 logger.info("DataFetcher interrupted during data fetch")
@@ -205,7 +207,7 @@ class DataFetcher(QThread):
                 put_vol=int(put_vol), call_vol=int(call_vol),
                 put_oi=int(put_oi), call_oi=int(call_oi),
                 expiry=expiry,
-                timestamp=datetime.now().strftime('%H:%M:%S'),
+                timestamp=cycle_timestamp,
             )
             logger.info("Data OK for %s/%s — vol_ratio=%.3f oi_ratio=%.3f put_vol=%d call_vol=%d",
                         ticker, expiry, vol_ratio, oi_ratio, dp.put_vol, dp.call_vol)
@@ -224,6 +226,7 @@ class PlotlyChartWidget(QWebEngineView):
     LAYER_COLORS = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+        '#aec7e8', '#ffbb78',
     ]
 
     def __init__(self, parent=None):
@@ -292,7 +295,7 @@ class PlotlyChartWidget(QWebEngineView):
                 zaxis=dict(title='Ratio', showgrid=True, gridcolor='#333'),
                 bgcolor='#1e1e1e',
                 camera=dict(
-                    eye=dict(x=1.8, y=-1.4, z=0.8),  # Angled view to see all layers
+                    eye=dict(x=2.2, y=-2.0, z=1.0),  # Angled view to see all 12 layers
                     up=dict(x=0, y=0, z=1),
                 ),
             ),
@@ -310,8 +313,8 @@ class PlotlyChartWidget(QWebEngineView):
 
 
 class VideoIndicator(QWidget):
-    """Plays bearish.mp4, bullish.mp4, or neutral.mp4 based on sentiment.
-    Compact single-video widget designed to sit in the metrics row."""
+    """Plays bearish/bullish/neutral video + audio based on sentiment.
+    Click to toggle mute/unmute. Sits in the metrics row (upper right)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -319,46 +322,122 @@ class VideoIndicator(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Video player (always muted — audio comes from separate MP3 player)
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumSize(140, 80)
+        self.video_widget.setStyleSheet("border: 2px solid #ff6b6b;")
+        self.video_widget.setCursor(Qt.CursorShape.PointingHandCursor)
         self.player = QMediaPlayer()
-        self.audio = QAudioOutput()
-        self.audio.setVolume(0)
-        self.player.setAudioOutput(self.audio)
+        self.video_audio = QAudioOutput()
+        self.video_audio.setVolume(0)  # Video audio always muted
+        self.player.setAudioOutput(self.video_audio)
         self.player.setVideoOutput(self.video_widget)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
 
+        # Audio player for MP3 files (separate from video)
+        self.audio_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.audio_output.setVolume(0)  # Start muted
+        self.audio_player.setAudioOutput(self.audio_output)
+        self.audio_player.setLoops(QMediaPlayer.Loops.Infinite)
+
         layout.addWidget(self.video_widget)
 
+        # Mute indicator overlay
+        self.mute_label = QLabel("\U0001f507", self.video_widget)
+        self.mute_label.setStyleSheet(
+            "color: #ff6b6b; background-color: rgba(0,0,0,180); "
+            "font-size: 14px; padding: 2px 5px; border-radius: 3px;"
+        )
+        self.mute_label.move(4, 4)
+        self.mute_label.show()
+
+        # Click handling via event filter on video widget
+        self.video_widget.installEventFilter(self)
+
+        # State
         self._current_video = ""
+        self._current_audio = ""
+        self._muted = True
+        self._audio_volume = 0.5
+
+    def eventFilter(self, obj, event):
+        if obj is self.video_widget and event.type() == event.Type.MouseButtonPress:
+            self.toggle_mute()
+            return True
+        return super().eventFilter(obj, event)
+
+    def toggle_mute(self):
+        self._muted = not self._muted
+        if self._muted:
+            self.audio_output.setVolume(0)
+            logger.debug("Audio muted")
+        else:
+            self.audio_output.setVolume(self._audio_volume)
+            logger.debug("Audio unmuted (volume=%.2f)", self._audio_volume)
+        self._update_mute_visual()
+
+    def _update_mute_visual(self):
+        if self._muted:
+            self.mute_label.setText("\U0001f507")
+            self.mute_label.setStyleSheet(
+                "color: #ff6b6b; background-color: rgba(0,0,0,180); "
+                "font-size: 14px; padding: 2px 5px; border-radius: 3px;"
+            )
+            self.video_widget.setStyleSheet("border: 2px solid #ff6b6b;")
+        else:
+            self.mute_label.setText("\U0001f50a")
+            self.mute_label.setStyleSheet(
+                "color: #4caf50; background-color: rgba(0,0,0,180); "
+                "font-size: 14px; padding: 2px 5px; border-radius: 3px;"
+            )
+            self.video_widget.setStyleSheet("border: 2px solid #4caf50;")
 
     def update_sentiment(self, vol_ratio: float):
         if pd.isna(vol_ratio):
             self.player.stop()
+            self.audio_player.stop()
+            self._current_video = ""
+            self._current_audio = ""
             return
 
         if vol_ratio > 1:
             video_file = 'bearish.mp4'
+            audio_file = 'bearish.mp3'
         elif vol_ratio < 1:
             video_file = 'bullish.mp4'
+            audio_file = 'bullish.mp3'
         else:
             video_file = 'neutral.mp4'
+            audio_file = 'neutral.mp3'
 
-        # Avoid restarting the same video
-        if video_file == self._current_video:
-            return
+        # Update video
+        if video_file != self._current_video:
+            path = resource_path(video_file)
+            if os.path.exists(path):
+                logger.debug("Playing %s: %s", video_file, path)
+                self.player.stop()
+                self.player.setSource(QUrl.fromLocalFile(path))
+                self.player.play()
+                self._current_video = video_file
+            else:
+                logger.warning("%s not found at %s", video_file, path)
+                self.player.stop()
+                self._current_video = ""
 
-        path = resource_path(video_file)
-        if os.path.exists(path):
-            logger.debug("Playing %s: %s", video_file, path)
-            self.player.stop()
-            self.player.setSource(QUrl.fromLocalFile(path))
-            self.player.play()
-            self._current_video = video_file
-        else:
-            logger.warning("%s not found at %s", video_file, path)
-            self.player.stop()
-            self._current_video = ""
+        # Update audio MP3
+        if audio_file != self._current_audio:
+            audio_path = resource_path(audio_file)
+            if os.path.exists(audio_path):
+                logger.debug("Playing audio %s: %s", audio_file, audio_path)
+                self.audio_player.stop()
+                self.audio_player.setSource(QUrl.fromLocalFile(audio_path))
+                self.audio_player.play()
+                self._current_audio = audio_file
+            else:
+                logger.debug("Audio %s not found (will load when available)", audio_file)
+                self.audio_player.stop()
+                self._current_audio = ""
 
 
 class MetricsPanel(QWidget):
@@ -481,7 +560,7 @@ class TickerTab(QWidget):
         self.chart.show()
         self.metrics.update_metrics(dp)
         self.expiry_label.setText(f"Expiry: {dp.expiry}")
-        # 3D chart: primary + next 5 expiries
+        # 3D chart: primary + next expiries
         chart_expiries = self.get_chart_expiries()
         self.chart.update_chart_3d(histories, self.ticker, chart_expiries)
 
@@ -748,7 +827,7 @@ class MainWindow(QMainWindow):
         self.start_refresh(fetch_expiries_for=new_tickers if new_tickers else tickers)
 
     def on_expiry_changed(self, ticker: str, expiry: str):
-        """User changed the expiry combo box — fetch primary + next 5 expiries."""
+        """User changed the expiry combo box — fetch primary + next expiries."""
         logger.info("Expiry changed for %s -> %s", ticker, expiry)
         tab = self.ticker_tabs.get(ticker)
         if self.fetcher.isRunning():
@@ -767,7 +846,7 @@ class MainWindow(QMainWindow):
             self.fetcher.requestInterruption()
             self.fetcher.wait(2000)
 
-        # Build task list: for each ticker, fetch primary + next 5 expiries
+        # Build task list: for each ticker, fetch primary + next expiries
         tasks = []
         for t in self.active_tickers:
             tab = self.ticker_tabs.get(t)
@@ -833,7 +912,7 @@ class MainWindow(QMainWindow):
 def main():
     # PyInstaller + QtWebEngine compatibility
     if getattr(sys, 'frozen', False):
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox --disable-gpu'
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox'
         os.chdir(os.path.dirname(sys.executable))
         try:
             import certifi
