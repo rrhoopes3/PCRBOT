@@ -3,7 +3,8 @@ import os
 import time
 import logging
 import logging.handlers
-from dataclasses import dataclass
+import csv
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Optional
 
@@ -19,7 +20,8 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QComboBox, QListWidget, QLineEdit,
-    QPushButton, QAbstractItemView, QFrame, QSplitter, QSizePolicy
+    QPushButton, QAbstractItemView, QFrame, QSplitter, QSizePolicy,
+    QCheckBox, QDoubleSpinBox, QFileDialog, QSlider,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -63,6 +65,28 @@ CONFIG_FILE = os.path.join(
     else os.path.dirname(os.path.abspath(__file__)),
     'pcr_config.json'
 )
+
+SESSIONS_DIR = os.path.join(
+    os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
+    else os.path.dirname(os.path.abspath(__file__)),
+    'sessions'
+)
+
+# --- Theme definitions ---
+DARK_THEME = {
+    'name': 'dark',
+    'bg': '#1e1e1e', 'bg2': '#2a2a2a', 'bg3': '#252525',
+    'fg': '#ddd', 'fg2': '#aaa', 'fg3': '#888', 'fg4': '#666',
+    'border': '#444', 'accent': '#1a73e8', 'green': '#388e3c',
+    'red': '#ff6b6b', 'grid': '#333', 'plotly_template': 'plotly_dark',
+}
+LIGHT_THEME = {
+    'name': 'light',
+    'bg': '#f5f5f5', 'bg2': '#ffffff', 'bg3': '#e8e8e8',
+    'fg': '#222', 'fg2': '#555', 'fg3': '#777', 'fg4': '#999',
+    'border': '#ccc', 'accent': '#1a73e8', 'green': '#2e7d32',
+    'red': '#d32f2f', 'grid': '#ddd', 'plotly_template': 'plotly_white',
+}
 
 
 def load_config() -> dict:
@@ -221,9 +245,8 @@ class DataFetcher(QThread):
 
 
 class PlotlyChartWidget(QWebEngineView):
-    """Renders Plotly charts — supports 3D multi-expiry layered view."""
+    """Renders Plotly 3D charts via WebGL — interactive, rotatable, zoomable."""
 
-    # Color palette for expiry layers
     LAYER_COLORS = [
         '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
@@ -233,84 +256,181 @@ class PlotlyChartWidget(QWebEngineView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(350)
-        self.setHtml("<html><body style='background:#1e1e1e;color:#aaa;display:flex;"
+        self.theme = DARK_THEME
+        self._show_placeholder()
+
+    def _show_placeholder(self):
+        t = self.theme
+        self.setHtml(f"<html><body style='background:{t['bg']};color:{t['fg2']};display:flex;"
                      "align-items:center;justify-content:center;height:100vh;margin:0;'>"
                      "<p>Waiting for data...</p></body></html>")
 
-    def update_chart_3d(self, histories: dict[str, list], ticker: str, expiries: list[str]):
-        """Render a 3D layered chart: X=time, Y=expiry layer, Z=ratio.
-        Each expiry gets its own 'lane' on the Y axis so they stack like a 3D cube."""
+    def update_chart_3d(self, histories: dict[str, list], ticker: str, expiries: list[str],
+                        connect_expiries: bool = False, comparison_data: dict = None):
+        """Render a 3D layered chart: X=time (floor), Y=expiry (floor depth), Z=ratio (vertical).
+        comparison_data: optional dict of {ticker: {key: [DataPoint]}} for multi-ticker overlay."""
         if not expiries or not histories:
             return
-
+        t = self.theme
         fig = go.Figure()
 
-        for i, expiry in enumerate(expiries[:NUM_3D_EXPIRIES]):
-            key = f"{ticker}_{expiry}"
-            points = histories.get(key, [])
-            if not points:
-                continue
+        # Build list of ticker datasets to render
+        datasets = [(ticker, histories, self.LAYER_COLORS)]
+        if comparison_data:
+            comp_palettes = [
+                ['#e6194b', '#f58231', '#ffe119', '#bfef45'],
+                ['#3cb44b', '#42d4f4', '#4363d8', '#911eb4'],
+            ]
+            for ci, (comp_ticker, comp_hist) in enumerate(comparison_data.items()):
+                datasets.append((comp_ticker, comp_hist, comp_palettes[ci % len(comp_palettes)]))
 
-            timestamps = [p.timestamp for p in points]
-            vol_ratios = [p.vol_ratio for p in points]
-            oi_ratios = [p.oi_ratio for p in points]
-            y_pos = [i] * len(points)  # Each expiry on its own Y lane
-            color = self.LAYER_COLORS[i % len(self.LAYER_COLORS)]
+        active_indices = []
+        expiry_data = {}
 
-            # Short label for legend
-            short_exp = expiry[5:] if len(expiry) > 5 else expiry  # "02-14" from "2026-02-14"
+        for ds_ticker, ds_hist, palette in datasets:
+            prefix = f"{ds_ticker}: " if len(datasets) > 1 else ""
+            for i, expiry in enumerate(expiries[:NUM_3D_EXPIRIES]):
+                key = f"{ds_ticker}_{expiry}"
+                points = ds_hist.get(key, [])
+                if not points:
+                    continue
 
-            # Vol ratio line
-            fig.add_trace(go.Scatter3d(
-                x=timestamps, y=y_pos, z=vol_ratios,
-                mode='lines+markers',
-                line=dict(color=color, width=4),
-                marker=dict(size=3, color=color),
-                name=f"{short_exp} Vol",
-                legendgroup=expiry,
-            ))
-            # OI ratio line — same Y lane, dashed
-            fig.add_trace(go.Scatter3d(
-                x=timestamps, y=y_pos, z=oi_ratios,
-                mode='lines+markers',
-                line=dict(color=color, width=3, dash='dash'),
-                marker=dict(size=2, color=color, symbol='diamond'),
-                name=f"{short_exp} OI",
-                legendgroup=expiry,
-            ))
+                if ds_ticker == ticker:
+                    active_indices.append((i, expiry))
+                    ts_map = {}
+                    for j, p in enumerate(points):
+                        ts_map[p.timestamp] = (p.vol_ratio, p.oi_ratio)
+                    expiry_data[i] = ts_map
 
-        # Y-axis tick labels = expiry dates
+                timestamps = [p.timestamp for p in points]
+                vol_ratios = [p.vol_ratio for p in points]
+                oi_ratios = [p.oi_ratio for p in points]
+                y_pos = [i] * len(points)
+                color = palette[i % len(palette)]
+                short_exp = expiry[5:] if len(expiry) > 5 else expiry
+
+                fig.add_trace(go.Scatter3d(
+                    x=timestamps, y=y_pos, z=vol_ratios,
+                    mode='lines+markers',
+                    line=dict(color=color, width=4),
+                    marker=dict(size=3, color=color),
+                    name=f"{prefix}{short_exp} Vol",
+                    legendgroup=f"{ds_ticker}_{expiry}",
+                ))
+                fig.add_trace(go.Scatter3d(
+                    x=timestamps, y=y_pos, z=oi_ratios,
+                    mode='lines+markers',
+                    line=dict(color=color, width=3, dash='dash'),
+                    marker=dict(size=2, color=color, symbol='diamond'),
+                    name=f"{prefix}{short_exp} OI",
+                    legendgroup=f"{ds_ticker}_{expiry}",
+                ))
+
+        # Connector lines
+        if connect_expiries and len(active_indices) >= 2:
+            all_timestamps = set()
+            for i, _ in active_indices:
+                if i in expiry_data:
+                    all_timestamps.update(expiry_data[i].keys())
+            for ts in sorted(all_timestamps):
+                vol_y, vol_z, oi_y, oi_z = [], [], [], []
+                for i, _ in active_indices:
+                    if i in expiry_data and ts in expiry_data[i]:
+                        vr, oir = expiry_data[i][ts]
+                        if pd.notna(vr):
+                            vol_y.append(i); vol_z.append(vr)
+                        if pd.notna(oir):
+                            oi_y.append(i); oi_z.append(oir)
+                if len(vol_y) >= 2:
+                    fig.add_trace(go.Scatter3d(
+                        x=[ts]*len(vol_y), y=vol_y, z=vol_z, mode='lines',
+                        line=dict(color='rgba(255,255,255,0.3)', width=2),
+                        showlegend=False, hoverinfo='skip'))
+                if len(oi_y) >= 2:
+                    fig.add_trace(go.Scatter3d(
+                        x=[ts]*len(oi_y), y=oi_y, z=oi_z, mode='lines',
+                        line=dict(color='rgba(255,200,100,0.25)', width=1.5, dash='dot'),
+                        showlegend=False, hoverinfo='skip'))
+
         active_expiries = [e for e in expiries[:NUM_3D_EXPIRIES]
                            if f"{ticker}_{e}" in histories and histories[f"{ticker}_{e}"]]
         y_tickvals = list(range(len(active_expiries)))
         y_ticktext = [e[5:] for e in active_expiries]
 
         fig.update_layout(
-            template='plotly_dark',
+            template=t['plotly_template'],
             title=dict(text=f"{ticker} — Multi-Expiry 3D Ratios", font=dict(size=16)),
             margin=dict(l=0, r=0, t=40, b=0),
             scene=dict(
-                xaxis=dict(title='Time', showgrid=True, gridcolor='#333'),
+                xaxis=dict(title='Time', showgrid=True, gridcolor=t['grid']),
                 yaxis=dict(title='Expiry', tickvals=y_tickvals, ticktext=y_ticktext,
-                           showgrid=True, gridcolor='#333'),
-                zaxis=dict(title='Ratio', showgrid=True, gridcolor='#333'),
-                bgcolor='#1e1e1e',
-                camera=dict(
-                    eye=dict(x=2.2, y=-2.0, z=1.0),  # Angled view to see all 12 layers
-                    up=dict(x=0, y=0, z=1),
-                ),
+                           showgrid=True, gridcolor=t['grid']),
+                zaxis=dict(title='Ratio', showgrid=True, gridcolor=t['grid']),
+                bgcolor=t['bg'],
+                camera=dict(eye=dict(x=2.2, y=-2.0, z=1.0)),
             ),
-            legend=dict(
-                font=dict(size=10),
-                bgcolor='rgba(30,30,30,0.8)',
-                bordercolor='#444',
-                borderwidth=1,
-            ),
-            paper_bgcolor='#1e1e1e',
+            legend=dict(font=dict(size=10), bgcolor=f"rgba(30,30,30,0.8)",
+                        bordercolor=t['border'], borderwidth=1),
+            paper_bgcolor=t['bg'],
         )
-
         html = fig.to_html(include_plotlyjs='cdn', full_html=True)
         self.setHtml(html)
+
+
+class HeatmapWidget(QWebEngineView):
+    """2D heatmap: rows=expiries, columns=timestamps, color=vol ratio."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(250)
+        self.theme = DARK_THEME
+        self.setHtml("<html><body style='background:#1e1e1e;color:#aaa;display:flex;"
+                     "align-items:center;justify-content:center;height:100%;margin:0;'>"
+                     "<p>Heatmap will appear after multiple data points...</p></body></html>")
+
+    def update_heatmap(self, histories: dict[str, list], ticker: str, expiries: list[str]):
+        if not expiries or not histories:
+            return
+        t = self.theme
+        # Build matrix: rows=expiries, cols=timestamps
+        all_timestamps = []
+        for expiry in expiries[:NUM_3D_EXPIRIES]:
+            key = f"{ticker}_{expiry}"
+            for p in histories.get(key, []):
+                if p.timestamp not in all_timestamps:
+                    all_timestamps.append(p.timestamp)
+        if not all_timestamps:
+            return
+
+        z_data = []
+        y_labels = []
+        for expiry in expiries[:NUM_3D_EXPIRIES]:
+            key = f"{ticker}_{expiry}"
+            points = histories.get(key, [])
+            if not points:
+                continue
+            ts_map = {p.timestamp: p.vol_ratio for p in points}
+            row = [ts_map.get(ts, np.nan) for ts in all_timestamps]
+            z_data.append(row)
+            y_labels.append(expiry[5:] if len(expiry) > 5 else expiry)
+
+        if not z_data:
+            return
+
+        fig = go.Figure(data=go.Heatmap(
+            z=z_data, x=all_timestamps, y=y_labels,
+            colorscale='RdYlGn_r',  # Red=high PCR (bearish), Green=low (bullish)
+            colorbar=dict(title='Vol PCR'),
+            hoverongaps=False,
+        ))
+        fig.update_layout(
+            template=t['plotly_template'],
+            title=dict(text=f"{ticker} — PCR Heatmap (Vol Ratio)", font=dict(size=14)),
+            xaxis=dict(title='Time'), yaxis=dict(title='Expiry'),
+            margin=dict(l=60, r=20, t=40, b=40),
+            paper_bgcolor=t['bg'], plot_bgcolor=t['bg'],
+        )
+        self.setHtml(fig.to_html(include_plotlyjs='cdn', full_html=True))
 
 
 class VideoIndicator(QWidget):
@@ -496,19 +616,26 @@ class MetricsPanel(QWidget):
 
 
 class TickerTab(QWidget):
-    """One tab per ticker: expiry selector, metrics, 3D chart, video indicator."""
+    """One tab per ticker: expiry selector, metrics, 3D chart, heatmap, alerts, export."""
     expiry_changed = pyqtSignal(str, str)  # ticker, new_expiry
+    alert_triggered = pyqtSignal(str, str, float)  # ticker, direction, value
 
     def __init__(self, ticker: str, parent=None):
         super().__init__(parent)
         self.ticker = ticker
         self.current_expiry = ""
-        self.all_expiries: list[str] = []  # Full expiry list for 3D chart
+        self.all_expiries: list[str] = []
+        self.comparison_tickers: list[str] = []  # For multi-ticker overlay
+        self._last_histories = None
+        self._alert_high = 1.5
+        self._alert_low = 0.5
+        self._alerts_enabled = False
+        self._last_alert_direction = ""  # Prevent repeated alerts
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Top row: expiry selector (metrics shown for selected expiry)
+        # === Row 1: Expiry selector + chart controls ===
         top = QHBoxLayout()
         top.addWidget(QLabel("Primary Expiry:"))
         self.expiry_combo = QComboBox()
@@ -518,28 +645,108 @@ class TickerTab(QWidget):
         self.expiry_label = QLabel("")
         self.expiry_label.setStyleSheet("color: #888;")
         top.addWidget(self.expiry_label)
-        # Info label about 3D
-        info_label = QLabel(f"(3D chart shows nearest {NUM_3D_EXPIRIES} expiries)")
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
-        top.addWidget(info_label)
+
+        self.connect_checkbox = QCheckBox("Connect")
+        self.connect_checkbox.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.connect_checkbox.setToolTip("Connect expiry layers at each timestamp")
+        self.connect_checkbox.stateChanged.connect(self._on_connect_toggled)
+        top.addWidget(self.connect_checkbox)
+
+        # Fullscreen pop-out button
+        self.popout_btn = QPushButton("Pop Out")
+        self.popout_btn.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        self.popout_btn.setToolTip("Open 3D chart in a separate window")
+        self.popout_btn.clicked.connect(self._pop_out_chart)
+        top.addWidget(self.popout_btn)
+
+        # Export buttons
+        self.export_csv_btn = QPushButton("CSV")
+        self.export_csv_btn.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        self.export_csv_btn.setToolTip("Export data to CSV")
+        self.export_csv_btn.clicked.connect(self._export_csv)
+        top.addWidget(self.export_csv_btn)
+
+        self.export_png_btn = QPushButton("PNG")
+        self.export_png_btn.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        self.export_png_btn.setToolTip("Screenshot the 3D chart")
+        self.export_png_btn.clicked.connect(self._export_png)
+        top.addWidget(self.export_png_btn)
+
         top.addStretch()
         layout.addLayout(top)
 
-        # Metrics + video indicator (for the primary/selected expiry)
+        # === Row 2: Alerts ===
+        alert_row = QHBoxLayout()
+        self.alert_checkbox = QCheckBox("Alerts")
+        self.alert_checkbox.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.alert_checkbox.setToolTip("Flash when PCR crosses thresholds")
+        self.alert_checkbox.stateChanged.connect(self._on_alerts_toggled)
+        alert_row.addWidget(self.alert_checkbox)
+
+        alert_row.addWidget(QLabel("High:"))
+        self.alert_high_spin = QDoubleSpinBox()
+        self.alert_high_spin.setRange(0.1, 10.0)
+        self.alert_high_spin.setSingleStep(0.1)
+        self.alert_high_spin.setValue(1.5)
+        self.alert_high_spin.setFixedWidth(65)
+        self.alert_high_spin.setStyleSheet("font-size: 11px;")
+        self.alert_high_spin.valueChanged.connect(lambda v: setattr(self, '_alert_high', v))
+        alert_row.addWidget(self.alert_high_spin)
+
+        alert_row.addWidget(QLabel("Low:"))
+        self.alert_low_spin = QDoubleSpinBox()
+        self.alert_low_spin.setRange(0.01, 10.0)
+        self.alert_low_spin.setSingleStep(0.1)
+        self.alert_low_spin.setValue(0.5)
+        self.alert_low_spin.setFixedWidth(65)
+        self.alert_low_spin.setStyleSheet("font-size: 11px;")
+        self.alert_low_spin.valueChanged.connect(lambda v: setattr(self, '_alert_low', v))
+        alert_row.addWidget(self.alert_low_spin)
+
+        self.alert_status = QLabel("")
+        self.alert_status.setStyleSheet("font-size: 11px; font-weight: bold;")
+        alert_row.addWidget(self.alert_status)
+
+        # Video size slider
+        alert_row.addStretch()
+        alert_row.addWidget(QLabel("Vid:"))
+        self.video_slider = QSlider(Qt.Orientation.Horizontal)
+        self.video_slider.setRange(100, 400)
+        self.video_slider.setValue(250)
+        self.video_slider.setFixedWidth(80)
+        self.video_slider.setToolTip("Resize video indicator")
+        self.video_slider.valueChanged.connect(self._on_video_resize)
+        alert_row.addWidget(self.video_slider)
+
+        layout.addLayout(alert_row)
+
+        # === Metrics + video indicator ===
         self.metrics = MetricsPanel()
         layout.addWidget(self.metrics)
 
-        # 3D Chart
+        # === Chart area: sub-tabs for 3D and Heatmap ===
+        self.chart_tabs = QTabWidget()
+        self.chart_tabs.setStyleSheet("QTabBar::tab { padding: 4px 12px; font-size: 11px; }")
+
         self.chart = PlotlyChartWidget()
         self.chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.chart, stretch=1)
+        self.chart_tabs.addTab(self.chart, "3D Chart")
 
-        # Error label (hidden by default)
+        self.heatmap = HeatmapWidget()
+        self.heatmap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.chart_tabs.addTab(self.heatmap, "Heatmap")
+
+        layout.addWidget(self.chart_tabs, stretch=1)
+
+        # Error label
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #ff6b6b; font-size: 14px; padding: 20px;")
         self.error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.error_label.hide()
         layout.addWidget(self.error_label)
+
+        # Pop-out window reference
+        self._popout_window = None
 
     def set_expiries(self, expiries: list[str]):
         self.all_expiries = expiries
@@ -556,35 +763,133 @@ class TickerTab(QWidget):
             self.expiry_changed.emit(self.ticker, text)
 
     def get_chart_expiries(self) -> list[str]:
-        """Return the primary expiry + the next NUM_3D_EXPIRIES after it."""
         if not self.all_expiries or not self.current_expiry:
             return []
         try:
             idx = self.all_expiries.index(self.current_expiry)
         except ValueError:
             idx = 0
-        # Primary + next N
         return self.all_expiries[idx:idx + 1 + NUM_3D_EXPIRIES]
 
+    def _on_connect_toggled(self, state):
+        chart_expiries = self.get_chart_expiries()
+        if chart_expiries and self._last_histories:
+            self.chart.update_chart_3d(
+                self._last_histories, self.ticker, chart_expiries,
+                connect_expiries=self.connect_checkbox.isChecked())
+
+    def _on_alerts_toggled(self, state):
+        self._alerts_enabled = bool(state)
+        if not state:
+            self.alert_status.setText("")
+            self._last_alert_direction = ""
+
+    def _check_alerts(self, vol_ratio: float):
+        """Check if PCR crosses alert thresholds."""
+        if not self._alerts_enabled or pd.isna(vol_ratio):
+            return
+        direction = ""
+        if vol_ratio >= self._alert_high:
+            direction = "HIGH"
+            self.alert_status.setText(f"ALERT: PCR {vol_ratio:.2f} >= {self._alert_high}")
+            self.alert_status.setStyleSheet("color: #ff6b6b; font-size: 11px; font-weight: bold;")
+        elif vol_ratio <= self._alert_low:
+            direction = "LOW"
+            self.alert_status.setText(f"ALERT: PCR {vol_ratio:.2f} <= {self._alert_low}")
+            self.alert_status.setStyleSheet("color: #4caf50; font-size: 11px; font-weight: bold;")
+        else:
+            self.alert_status.setText(f"PCR {vol_ratio:.2f} — normal")
+            self.alert_status.setStyleSheet("color: #888; font-size: 11px; font-weight: normal;")
+            self._last_alert_direction = ""
+            return
+
+        if direction and direction != self._last_alert_direction:
+            self._last_alert_direction = direction
+            self.alert_triggered.emit(self.ticker, direction, vol_ratio)
+
+    def _on_video_resize(self, value):
+        h = int(value * 140 / 250)
+        self.metrics.video_indicator.video_widget.setFixedSize(value, h)
+        self.metrics.video_indicator.setFixedHeight(h)
+
+    def _pop_out_chart(self):
+        """Open the 3D chart in a separate resizable window."""
+        if self._popout_window:
+            self._popout_window.close()
+        self._popout_window = QMainWindow()
+        self._popout_window.setWindowTitle(f"{self.ticker} — 3D Chart (Pop Out)")
+        self._popout_window.resize(1000, 700)
+        popout_chart = PlotlyChartWidget()
+        popout_chart.theme = self.chart.theme
+        self._popout_window.setCentralWidget(popout_chart)
+        self._popout_window.show()
+        # Render same data
+        if self._last_histories:
+            chart_expiries = self.get_chart_expiries()
+            popout_chart.update_chart_3d(
+                self._last_histories, self.ticker, chart_expiries,
+                connect_expiries=self.connect_checkbox.isChecked())
+
+    def _export_csv(self):
+        """Export all history data for this ticker to CSV."""
+        if not self._last_histories:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export CSV", f"{self.ticker}_pcr_data.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        rows = []
+        for key, points in self._last_histories.items():
+            if key.startswith(f"{self.ticker}_"):
+                for p in points:
+                    rows.append(asdict(p))
+        if rows:
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+            logger.info("Exported %d rows to %s", len(rows), path)
+
+    def _export_png(self):
+        """Screenshot the current 3D chart via grab()."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PNG", f"{self.ticker}_chart.png", "PNG Files (*.png)")
+        if not path:
+            return
+        pixmap = self.chart.grab()
+        pixmap.save(path)
+        logger.info("Chart screenshot saved to %s", path)
+
     def update_data(self, dp: DataPoint, histories: dict[str, list]):
-        """Update metrics for the primary expiry + render the 3D multi-expiry chart."""
         self.error_label.hide()
         self.chart.show()
         self.metrics.update_metrics(dp)
         self.expiry_label.setText(f"Expiry: {dp.expiry}")
-        # 3D chart: primary + next expiries
+        self._last_histories = histories
+        self._check_alerts(dp.vol_ratio)
         chart_expiries = self.get_chart_expiries()
-        self.chart.update_chart_3d(histories, self.ticker, chart_expiries)
+        self.chart.update_chart_3d(histories, self.ticker, chart_expiries,
+                                   connect_expiries=self.connect_checkbox.isChecked())
+        # Also update heatmap
+        self.heatmap.update_heatmap(histories, self.ticker, chart_expiries)
 
     def show_error(self, msg: str):
         self.error_label.setText(msg)
         self.error_label.show()
 
+    def apply_theme(self, theme: dict):
+        """Apply theme to chart widgets."""
+        self.chart.theme = theme
+        self.heatmap.theme = theme
+
 
 class SidebarWidget(QWidget):
-    """Left sidebar for ticker selection and API key config."""
+    """Left sidebar for ticker selection, API key config, theme, and sessions."""
     tickers_changed = pyqtSignal(list)
     api_key_changed = pyqtSignal(str)
+    theme_toggled = pyqtSignal()       # Toggle dark/light
+    save_session = pyqtSignal()
+    load_session = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -630,6 +935,43 @@ class SidebarWidget(QWidget):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: #444;")
         layout.addWidget(sep)
+
+        # --- Theme toggle + Session buttons ---
+        controls_row = QHBoxLayout()
+        self.theme_btn = QPushButton("\u263e Dark")
+        self.theme_btn.setStyleSheet(
+            "background-color: #333; color: #ddd; padding: 4px 6px;"
+            "border-radius: 4px; font-size: 11px;"
+        )
+        self.theme_btn.setToolTip("Toggle dark / light theme")
+        self.theme_btn.clicked.connect(self.theme_toggled.emit)
+        controls_row.addWidget(self.theme_btn)
+
+        save_sess_btn = QPushButton("\U0001f4be Save")
+        save_sess_btn.setStyleSheet(
+            "background-color: #333; color: #ddd; padding: 4px 6px;"
+            "border-radius: 4px; font-size: 11px;"
+        )
+        save_sess_btn.setToolTip("Save session data to disk")
+        save_sess_btn.clicked.connect(self.save_session.emit)
+        controls_row.addWidget(save_sess_btn)
+
+        load_sess_btn = QPushButton("\U0001f4c2 Load")
+        load_sess_btn.setStyleSheet(
+            "background-color: #333; color: #ddd; padding: 4px 6px;"
+            "border-radius: 4px; font-size: 11px;"
+        )
+        load_sess_btn.setToolTip("Load a saved session")
+        load_sess_btn.clicked.connect(self.load_session.emit)
+        controls_row.addWidget(load_sess_btn)
+
+        layout.addLayout(controls_row)
+
+        # Separator
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #444;")
+        layout.addWidget(sep2)
 
         layout.addWidget(QLabel("Presets:"))
         self.preset_list = QListWidget()
@@ -677,6 +1019,15 @@ class SidebarWidget(QWidget):
 
         self.preset_list.itemSelectionChanged.connect(self._emit_tickers)
 
+    def update_theme_button(self, theme: dict):
+        """Update theme button text/icon to reflect current theme."""
+        if theme['name'] == 'dark':
+            self.theme_btn.setText("\u2600 Light")
+            self.theme_btn.setToolTip("Switch to light theme")
+        else:
+            self.theme_btn.setText("\u263e Dark")
+            self.theme_btn.setToolTip("Switch to dark theme")
+
     def _on_save_key(self):
         key = self.api_key_input.text().strip()
         if key:
@@ -716,7 +1067,7 @@ class SidebarWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
-    """Main application window."""
+    """Main application window with theme, session save/load, and alert sounds."""
 
     def __init__(self):
         super().__init__()
@@ -725,43 +1076,10 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.resize(1400, 900)
-        self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #1e1e1e;
-                color: #ddd;
-            }
-            QTabWidget::pane {
-                border: 1px solid #444;
-                background-color: #1e1e1e;
-            }
-            QTabBar::tab {
-                background-color: #2a2a2a;
-                color: #aaa;
-                padding: 8px 16px;
-                border: 1px solid #444;
-                border-bottom: none;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }
-            QTabBar::tab:selected {
-                background-color: #1e1e1e;
-                color: #fff;
-            }
-            QLabel {
-                color: #ddd;
-            }
-            QComboBox {
-                background-color: #2a2a2a;
-                color: #ddd;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 4px;
-            }
-            QStatusBar {
-                background-color: #252525;
-                color: #888;
-            }
-        """)
+
+        # Theme state
+        self.current_theme = DARK_THEME
+        self._apply_global_theme()
 
         # Layout: splitter with sidebar on left, tabs on right
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -779,6 +1097,12 @@ class MainWindow(QMainWindow):
         self.histories: dict[str, list[DataPoint]] = {}
         self.ticker_tabs: dict[str, TickerTab] = {}
         self.active_tickers: list[str] = []
+
+        # Alert sound player (uses system bell as fallback)
+        self.alert_player = QMediaPlayer()
+        self.alert_audio_out = QAudioOutput()
+        self.alert_audio_out.setVolume(0.7)
+        self.alert_player.setAudioOutput(self.alert_audio_out)
 
         # Data fetcher
         self.fetcher = DataFetcher()
@@ -803,9 +1127,12 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.countdown_label)
 
-        # Connect sidebar and tab switch
+        # Connect sidebar signals
         self.sidebar.tickers_changed.connect(self.on_tickers_changed)
         self.sidebar.api_key_changed.connect(self.on_api_key_changed)
+        self.sidebar.theme_toggled.connect(self.toggle_theme)
+        self.sidebar.save_session.connect(self.save_session)
+        self.sidebar.load_session.connect(self.load_session)
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
 
         # Initial load
@@ -813,6 +1140,169 @@ class MainWindow(QMainWindow):
         if initial:
             self.on_tickers_changed(initial)
 
+    # --- Theme ---
+    def _apply_global_theme(self):
+        t = self.current_theme
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background-color: {t['bg']};
+                color: {t['fg']};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {t['border']};
+                background-color: {t['bg']};
+            }}
+            QTabBar::tab {{
+                background-color: {t['bg2']};
+                color: {t['fg2']};
+                padding: 8px 16px;
+                border: 1px solid {t['border']};
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {t['bg']};
+                color: {t['fg']};
+            }}
+            QLabel {{
+                color: {t['fg']};
+            }}
+            QComboBox {{
+                background-color: {t['bg2']};
+                color: {t['fg']};
+                border: 1px solid {t['border']};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QStatusBar {{
+                background-color: {t['bg3']};
+                color: {t['fg3']};
+            }}
+            QDoubleSpinBox {{
+                background-color: {t['bg2']};
+                color: {t['fg']};
+                border: 1px solid {t['border']};
+            }}
+            QSlider::groove:horizontal {{
+                background: {t['border']};
+                height: 4px;
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {t['accent']};
+                width: 12px;
+                height: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }}
+        """)
+
+    def toggle_theme(self):
+        if self.current_theme['name'] == 'dark':
+            self.current_theme = LIGHT_THEME
+        else:
+            self.current_theme = DARK_THEME
+        self._apply_global_theme()
+        self.sidebar.update_theme_button(self.current_theme)
+        # Apply to all open ticker tabs
+        for tab in self.ticker_tabs.values():
+            tab.apply_theme(self.current_theme)
+        logger.info("Theme switched to %s", self.current_theme['name'])
+
+    # --- Session save/load ---
+    def save_session(self):
+        """Save all history data to a JSON file."""
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+        default_name = datetime.now().strftime("session_%Y%m%d_%H%M%S.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Session", os.path.join(SESSIONS_DIR, default_name),
+            "JSON Files (*.json)")
+        if not path:
+            return
+        session_data = {
+            'tickers': self.active_tickers,
+            'expiries': {},
+            'histories': {},
+        }
+        for ticker, tab in self.ticker_tabs.items():
+            session_data['expiries'][ticker] = tab.all_expiries
+        for key, points in self.histories.items():
+            session_data['histories'][key] = [asdict(p) for p in points]
+        try:
+            with open(path, 'w') as f:
+                json.dump(session_data, f, indent=2)
+            logger.info("Session saved to %s (%d history keys)", path, len(self.histories))
+            self.status_label.setText(f"Session saved: {os.path.basename(path)}")
+        except Exception:
+            logger.exception("Failed to save session")
+            self.status_label.setText("ERROR: Failed to save session")
+
+    def load_session(self):
+        """Load a previously saved session from JSON."""
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Session", SESSIONS_DIR, "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, 'r') as f:
+                session_data = json.load(f)
+        except Exception:
+            logger.exception("Failed to load session file")
+            self.status_label.setText("ERROR: Failed to load session")
+            return
+
+        # Restore histories
+        self.histories.clear()
+        for key, points_raw in session_data.get('histories', {}).items():
+            self.histories[key] = [DataPoint(**p) for p in points_raw]
+
+        # Restore tickers — create tabs and set expiries
+        tickers = session_data.get('tickers', [])
+        if tickers:
+            # Select matching tickers in sidebar
+            for i in range(self.sidebar.preset_list.count()):
+                item = self.sidebar.preset_list.item(i)
+                item.setSelected(item.text() in tickers)
+
+            # Create tabs
+            self.on_tickers_changed(tickers)
+
+            # Restore expiries and replay last data point to charts
+            for ticker, tab in self.ticker_tabs.items():
+                saved_expiries = session_data.get('expiries', {}).get(ticker, [])
+                if saved_expiries:
+                    tab.set_expiries(saved_expiries)
+                # Find last data point for the primary expiry
+                primary_key = f"{ticker}_{tab.current_expiry}"
+                if primary_key in self.histories and self.histories[primary_key]:
+                    last_dp = self.histories[primary_key][-1]
+                    tab.update_data(last_dp, self.histories)
+
+        logger.info("Session loaded from %s (%d history keys)", path, len(self.histories))
+        self.status_label.setText(f"Session loaded: {os.path.basename(path)}")
+
+    # --- Alert handling ---
+    def _on_alert_triggered(self, ticker: str, direction: str, value: float):
+        """Handle alert from a TickerTab — play a sound and show status."""
+        logger.info("ALERT: %s PCR %s — value %.3f", ticker, direction, value)
+        self.status_label.setText(
+            f"\u26a0 ALERT: {ticker} PCR {direction} ({value:.2f})")
+        # Try to play an alert sound — reuse bearish/bullish audio
+        if direction == "HIGH":
+            audio_file = resource_path('bearish.m4a')
+        else:
+            audio_file = resource_path('bullish.m4a')
+        if os.path.exists(audio_file):
+            self.alert_player.stop()
+            self.alert_player.setSource(QUrl.fromLocalFile(audio_file))
+            self.alert_player.play()
+        else:
+            # Fallback: system bell
+            QApplication.beep()
+
+    # --- Tab management ---
     def on_tab_changed(self, index: int):
         """Pause audio on all tabs except the active one."""
         for t, tab in self.ticker_tabs.items():
@@ -843,6 +1333,8 @@ class MainWindow(QMainWindow):
             if t not in self.ticker_tabs:
                 tab = TickerTab(t)
                 tab.expiry_changed.connect(self.on_expiry_changed)
+                tab.alert_triggered.connect(self._on_alert_triggered)
+                tab.apply_theme(self.current_theme)
                 self.ticker_tabs[t] = tab
                 self.tab_widget.addTab(tab, t)
                 new_tickers.append(t)
@@ -911,8 +1403,10 @@ class MainWindow(QMainWindow):
             tab.update_data(dp, self.histories)
         else:
             # Non-primary expiry arrived — just refresh the 3D chart
+            tab._last_histories = self.histories
             chart_expiries = tab.get_chart_expiries()
-            tab.chart.update_chart_3d(self.histories, ticker, chart_expiries)
+            tab.chart.update_chart_3d(self.histories, ticker, chart_expiries,
+                                      connect_expiries=tab.connect_checkbox.isChecked())
 
     def on_expiries_ready(self, ticker: str, expiries: list[str]):
         logger.info("Expiries ready for %s: %d options", ticker, len(expiries))

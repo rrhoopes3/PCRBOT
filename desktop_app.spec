@@ -14,8 +14,6 @@ a = Analysis(
         ('app_icon.ico', '.'),
     ],
     hiddenimports=[
-        'PyQt6.QtWebEngineWidgets',
-        'PyQt6.QtWebEngineCore',
         'PyQt6.QtMultimedia',
         'PyQt6.QtMultimediaWidgets',
         'PyQt6.sip',
@@ -31,7 +29,7 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'PIL'],
+    excludes=['tkinter'],
     noarchive=False,
 )
 
@@ -47,15 +45,17 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,  # Change to True temporarily for debugging
     icon='app_icon.ico',
 )
 
+# One-folder build (easier to distribute, less DLL issues)
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
     strip=False,
     upx=True,
+    upx_exclude=[],
     name='MultiPCRDashboard',
 )
