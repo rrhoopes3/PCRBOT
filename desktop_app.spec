@@ -8,9 +8,10 @@ a = Analysis(
         ('bearish.mp4', '.'),
         ('bullish.mp4', '.'),
         ('neutral.mp4', '.'),
-        ('bearish.mp3', '.'),
-        ('bullish.mp3', '.'),
-        ('neutral.mp3', '.'),
+        ('bearish.m4a', '.'),
+        ('bullish.m4a', '.'),
+        ('neutral.m4a', '.'),
+        ('app_icon.ico', '.'),
     ],
     hiddenimports=[
         'PyQt6.QtWebEngineWidgets',
@@ -47,6 +48,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon='app_icon.ico',
 )
 
 coll = COLLECT(

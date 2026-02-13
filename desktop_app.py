@@ -15,6 +15,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QComboBox, QListWidget, QLineEdit,
@@ -323,8 +324,10 @@ class VideoIndicator(QWidget):
         layout.setSpacing(0)
 
         # Video player (always muted — audio comes from separate MP3 player)
+        self.setFixedHeight(140)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(140, 80)
+        self.video_widget.setFixedSize(250, 140)
         self.video_widget.setStyleSheet("border: 2px solid #ff6b6b;")
         self.video_widget.setCursor(Qt.CursorShape.PointingHandCursor)
         self.player = QMediaPlayer()
@@ -377,6 +380,15 @@ class VideoIndicator(QWidget):
             logger.debug("Audio unmuted (volume=%.2f)", self._audio_volume)
         self._update_mute_visual()
 
+    def pause_audio(self):
+        """Pause audio when tab is not visible."""
+        self.audio_player.pause()
+
+    def resume_audio(self):
+        """Resume audio when tab becomes visible (only if unmuted)."""
+        if self._current_audio:
+            self.audio_player.play()
+
     def _update_mute_visual(self):
         if self._muted:
             self.mute_label.setText("\U0001f507")
@@ -403,13 +415,13 @@ class VideoIndicator(QWidget):
 
         if vol_ratio > 1:
             video_file = 'bearish.mp4'
-            audio_file = 'bearish.mp3'
+            audio_file = 'bearish.m4a'
         elif vol_ratio < 1:
             video_file = 'bullish.mp4'
-            audio_file = 'bullish.mp3'
+            audio_file = 'bullish.m4a'
         else:
             video_file = 'neutral.mp4'
-            audio_file = 'neutral.mp3'
+            audio_file = 'neutral.m4a'
 
         # Update video
         if video_file != self._current_video:
@@ -709,6 +721,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Multi PCR Dashboard")
+        icon_path = resource_path('app_icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.resize(1400, 900)
         self.setStyleSheet("""
             QMainWindow, QWidget {
@@ -788,14 +803,23 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.countdown_label)
 
-        # Connect sidebar
+        # Connect sidebar and tab switch
         self.sidebar.tickers_changed.connect(self.on_tickers_changed)
         self.sidebar.api_key_changed.connect(self.on_api_key_changed)
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
 
         # Initial load
         initial = self.sidebar.get_selected_tickers()
         if initial:
             self.on_tickers_changed(initial)
+
+    def on_tab_changed(self, index: int):
+        """Pause audio on all tabs except the active one."""
+        for t, tab in self.ticker_tabs.items():
+            if self.tab_widget.indexOf(tab) == index:
+                tab.metrics.video_indicator.resume_audio()
+            else:
+                tab.metrics.video_indicator.pause_audio()
 
     def on_api_key_changed(self, key: str):
         """API key was saved — update fetcher and trigger refresh."""
