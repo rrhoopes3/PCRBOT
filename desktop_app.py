@@ -268,11 +268,22 @@ class PlotlyChartWidget(QWebEngineView):
     def update_chart_3d(self, histories: dict[str, list], ticker: str, expiries: list[str],
                         connect_expiries: bool = False, comparison_data: dict = None):
         """Render a 3D layered chart: X=time (floor), Y=expiry (floor depth), Z=ratio (vertical).
-        comparison_data: optional dict of {ticker: {key: [DataPoint]}} for multi-ticker overlay."""
+        comparison_data: optional dict of {ticker: {key: [DataPoint]}} for multi-ticker overlay.
+        Uses integer indices for X/Y axes with custom tick labels to prevent Plotly
+        from interpreting time strings as dates (which breaks reset camera)."""
         if not expiries or not histories:
             return
         t = self.theme
         fig = go.Figure()
+
+        # Build ordered list of all unique timestamps across all expiries
+        all_ts_ordered = []
+        for expiry in expiries[:NUM_3D_EXPIRIES]:
+            key = f"{ticker}_{expiry}"
+            for p in histories.get(key, []):
+                if p.timestamp not in all_ts_ordered:
+                    all_ts_ordered.append(p.timestamp)
+        ts_to_idx = {ts: i for i, ts in enumerate(all_ts_ordered)}
 
         # Build list of ticker datasets to render
         datasets = [(ticker, histories, self.LAYER_COLORS)]
@@ -302,7 +313,9 @@ class PlotlyChartWidget(QWebEngineView):
                         ts_map[p.timestamp] = (p.vol_ratio, p.oi_ratio)
                     expiry_data[i] = ts_map
 
-                timestamps = [p.timestamp for p in points]
+                # Use integer indices for X instead of timestamp strings
+                x_indices = [ts_to_idx[p.timestamp] for p in points]
+                hover_labels = [p.timestamp for p in points]
                 vol_ratios = [p.vol_ratio for p in points]
                 oi_ratios = [p.oi_ratio for p in points]
                 y_pos = [i] * len(points)
@@ -310,20 +323,22 @@ class PlotlyChartWidget(QWebEngineView):
                 short_exp = expiry[5:] if len(expiry) > 5 else expiry
 
                 fig.add_trace(go.Scatter3d(
-                    x=timestamps, y=y_pos, z=vol_ratios,
+                    x=x_indices, y=y_pos, z=vol_ratios,
                     mode='lines+markers',
                     line=dict(color=color, width=4),
                     marker=dict(size=3, color=color),
                     name=f"{prefix}{short_exp} Vol",
                     legendgroup=f"{ds_ticker}_{expiry}",
+                    text=hover_labels, hovertemplate='%{text}<br>Ratio: %{z:.3f}<extra></extra>',
                 ))
                 fig.add_trace(go.Scatter3d(
-                    x=timestamps, y=y_pos, z=oi_ratios,
+                    x=x_indices, y=y_pos, z=oi_ratios,
                     mode='lines+markers',
                     line=dict(color=color, width=3, dash='dash'),
                     marker=dict(size=2, color=color, symbol='diamond'),
                     name=f"{prefix}{short_exp} OI",
                     legendgroup=f"{ds_ticker}_{expiry}",
+                    text=hover_labels, hovertemplate='%{text}<br>OI Ratio: %{z:.3f}<extra></extra>',
                 ))
 
         # Connector lines
@@ -341,14 +356,15 @@ class PlotlyChartWidget(QWebEngineView):
                             vol_y.append(i); vol_z.append(vr)
                         if pd.notna(oir):
                             oi_y.append(i); oi_z.append(oir)
+                x_idx = ts_to_idx.get(ts, 0)
                 if len(vol_y) >= 2:
                     fig.add_trace(go.Scatter3d(
-                        x=[ts]*len(vol_y), y=vol_y, z=vol_z, mode='lines',
+                        x=[x_idx]*len(vol_y), y=vol_y, z=vol_z, mode='lines',
                         line=dict(color='rgba(255,255,255,0.3)', width=2),
                         showlegend=False, hoverinfo='skip'))
                 if len(oi_y) >= 2:
                     fig.add_trace(go.Scatter3d(
-                        x=[ts]*len(oi_y), y=oi_y, z=oi_z, mode='lines',
+                        x=[x_idx]*len(oi_y), y=oi_y, z=oi_z, mode='lines',
                         line=dict(color='rgba(255,200,100,0.25)', width=1.5, dash='dot'),
                         showlegend=False, hoverinfo='skip'))
 
@@ -357,12 +373,17 @@ class PlotlyChartWidget(QWebEngineView):
         y_tickvals = list(range(len(active_expiries)))
         y_ticktext = [e[5:] for e in active_expiries]
 
+        # X axis tick labels (show timestamps as text on numeric axis)
+        x_tickvals = list(range(len(all_ts_ordered)))
+        x_ticktext = all_ts_ordered
+
         fig.update_layout(
             template=t['plotly_template'],
             title=dict(text=f"{ticker} — Multi-Expiry 3D Ratios", font=dict(size=16)),
             margin=dict(l=0, r=0, t=40, b=0),
             scene=dict(
-                xaxis=dict(title='Time', showgrid=True, gridcolor=t['grid']),
+                xaxis=dict(title='Time', tickvals=x_tickvals, ticktext=x_ticktext,
+                           showgrid=True, gridcolor=t['grid']),
                 yaxis=dict(title='Expiry', tickvals=y_tickvals, ticktext=y_ticktext,
                            showgrid=True, gridcolor=t['grid']),
                 zaxis=dict(title='Ratio', showgrid=True, gridcolor=t['grid']),
@@ -426,7 +447,8 @@ class HeatmapWidget(QWebEngineView):
         fig.update_layout(
             template=t['plotly_template'],
             title=dict(text=f"{ticker} — PCR Heatmap (Vol Ratio)", font=dict(size=14)),
-            xaxis=dict(title='Time'), yaxis=dict(title='Expiry'),
+            xaxis=dict(title='Time', type='category'),  # Force categorical to prevent date parsing
+            yaxis=dict(title='Expiry', type='category'),
             margin=dict(l=60, r=20, t=40, b=40),
             paper_bgcolor=t['bg'], plot_bgcolor=t['bg'],
         )
